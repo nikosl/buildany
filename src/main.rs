@@ -1,5 +1,6 @@
-use std::fs::DirEntry;
-use std::{env, fs, path::PathBuf};
+use std::io::{BufRead, BufReader, Error, ErrorKind};
+use std::process::{Command, Stdio};
+use std::{env, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -28,6 +29,7 @@ static RECIPES: [(&str, Builders); 8] = [
     ("docker-compose.yml", Builders::DockerCompose),
 ];
 
+#[allow(dead_code)]
 struct Builder {
     pwd: PathBuf,
     cmd: String,
@@ -90,6 +92,25 @@ fn discover(pwd: PathBuf) -> Option<Builder> {
         })
 }
 
+fn exec(pwd: PathBuf, cmd: &str, args: Vec<String>) -> Result<(), Error> {
+    let stdout = Command::new(cmd)
+        .current_dir(pwd)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .spawn()?
+        .stdout
+        .ok_or_else(|| Error::new(ErrorKind::Other, "Could not capture standard output."))?;
+
+    let reader = BufReader::new(stdout);
+
+    reader
+        .lines()
+        .map_while(|line| line.ok())
+        .for_each(|line| println!("{}", line));
+
+    Ok(())
+}
+
 #[derive(Parser)]
 #[command(author, version, about)]
 struct BuildAny {
@@ -110,9 +131,15 @@ fn main() {
     let cli = BuildAny::parse();
 
     let pwd = cli.pwd.or_else(|| env::var(PWD_KEY).ok());
-
-    // match cli.command {
-    //     // Build => ,
-    //     // Test => ,
-    // }
+    let br = pwd.and_then(|p| discover(PathBuf::from(p)));
+    if let Some(b) = br {
+        let res = match cli.command {
+            Commands::Build => exec(b.pwd, &b.cmd, b.build),
+            Commands::Run => exec(b.pwd, &b.cmd, b.run),
+            Commands::Test => exec(b.pwd, &b.cmd, b.test),
+        };
+        if let Err(e) = res {
+            eprintln!("{}", e);
+        }
+    };
 }
