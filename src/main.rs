@@ -1,10 +1,9 @@
-use std::io::{BufRead, BufReader, Error, ErrorKind};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
 use std::process::{Command, Stdio};
+use std::thread;
 use std::{env, path::PathBuf};
 
 use clap::{Parser, Subcommand};
-
-const PWD_KEY: &str = "PWD";
 
 #[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Copy, Clone)]
 enum Builders {
@@ -30,6 +29,7 @@ static RECIPES: [(&str, Builders); 8] = [
 ];
 
 #[allow(dead_code)]
+#[derive(Debug)]
 struct Builder {
     pwd: PathBuf,
     cmd: String,
@@ -49,6 +49,7 @@ fn discover(pwd: PathBuf) -> Option<Builder> {
         .iter()
         .find_map(|(name, builder)| {
             let path = pwd.join(name);
+            println!("{:?} ", path);
             if path.exists() {
                 return Some((pwd.clone(), name, builder));
             }
@@ -93,20 +94,59 @@ fn discover(pwd: PathBuf) -> Option<Builder> {
 }
 
 fn exec(pwd: PathBuf, cmd: &str, args: Vec<String>) -> Result<(), Error> {
-    let stdout = Command::new(cmd)
+    let mut child = Command::new(cmd)
         .current_dir(pwd)
         .args(&args)
         .stdout(Stdio::piped())
-        .spawn()?
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdout = child
         .stdout
+        .take()
         .ok_or_else(|| Error::new(ErrorKind::Other, "Could not capture standard output."))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| Error::new(ErrorKind::Other, "Could not capture standard error."))?;
 
-    let reader = BufReader::new(stdout);
+    // let mut rout = BufReader::new(stdout);
+    let rerr = BufReader::new(stderr);
 
-    reader
-        .lines()
-        .map_while(|line| line.ok())
-        .for_each(|line| println!("{}", line));
+    let tout = thread::spawn(move || -> Result<(), Error> {
+        let mut buf = [0u8; 1024];
+        loop {
+            let num_read = stdout.read(&mut buf)?;
+            if num_read == 0 {
+                break;
+            }
+
+            let buf = &buf[..num_read];
+            std::io::stdout().write_all(buf)?;
+        }
+        Ok(())
+        // rout.lines()
+        // // .map_while(|line| line.ok())
+        // .filter_map(|line| line.ok())
+        // .for_each(|line| {
+        //     // std::io::stdout().write_all(line.as_bytes()).unwrap();
+        //     println!("{}", line)
+        // });
+        // rout.bytes()
+        //     .map_while(|b| b.ok())
+        //     .map(|b| std::io::stdout().write_all(&[b]))
+    });
+
+    let terr = thread::spawn(move || {
+        rerr.bytes()
+            .map_while(|b| b.ok())
+            .map(|b| std::io::stderr().write_all(&[b]))
+    });
+
+    let _ = tout.join();
+    jjterr.join();
+
+    child.wait()?;
 
     Ok(())
 }
@@ -117,7 +157,7 @@ struct BuildAny {
     #[command(subcommand)]
     command: Commands,
 
-    pwd: Option<String>,
+    pwd: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -130,8 +170,10 @@ enum Commands {
 fn main() {
     let cli = BuildAny::parse();
 
-    let pwd = cli.pwd.or_else(|| env::var(PWD_KEY).ok());
-    let br = pwd.and_then(|p| discover(PathBuf::from(p)));
+    let pwd = cli.pwd.or_else(|| env::current_dir().ok());
+    println!("{:?} ", pwd);
+    let br = pwd.and_then(discover);
+    println!("{:?} ", br);
     if let Some(b) = br {
         let res = match cli.command {
             Commands::Build => exec(b.pwd, &b.cmd, b.build),
@@ -142,4 +184,5 @@ fn main() {
             eprintln!("{}", e);
         }
     };
+    println!("{:?} ", env::var("PWD"));
 }
