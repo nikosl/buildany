@@ -1,15 +1,17 @@
-use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
-use std::process::{Command, Stdio};
-use std::thread;
+use std::io::{self, BufReader, Read, Write};
+use std::path::Path;
 use std::{env, path::PathBuf};
+use std::{process, thread};
 
-use clap::{Parser, Subcommand};
+use clap::{Command, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
+use clap_complete::{Generator, Shell};
+use console::style;
 
-#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Copy, Clone, ValueEnum)]
 enum Builders {
     Make,
     Task,
-    Earth,
+    Earthly,
     Mix,
     Cargo,
     Go,
@@ -20,7 +22,7 @@ enum Builders {
 static RECIPES: [(&str, Builders); 8] = [
     ("Makefile", Builders::Make),
     ("Taskfile.yml", Builders::Task),
-    ("Earthfile", Builders::Earth),
+    ("Earthfile", Builders::Earthly),
     ("mix.exs", Builders::Mix),
     ("Cargo.toml", Builders::Cargo),
     ("go.mod", Builders::Go),
@@ -28,161 +30,292 @@ static RECIPES: [(&str, Builders); 8] = [
     ("docker-compose.yml", Builders::DockerCompose),
 ];
 
-#[allow(dead_code)]
-#[derive(Debug)]
-struct Builder {
-    pwd: PathBuf,
-    cmd: String,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BuilderCmd {
+    name: String,
     run: Vec<String>,
     test: Vec<String>,
     build: Vec<String>,
-    recipe: String,
-    priority: Builders,
 }
 
-fn discover(pwd: PathBuf) -> Option<Builder> {
+impl From<Builders> for BuilderCmd {
+    fn from(builder: Builders) -> Self {
+        match builder {
+            Builders::Make => BuilderCmd::builder("make"),
+            Builders::Task => BuilderCmd::builder("task"),
+            Builders::Earthly => BuilderCmd::new("earthly")
+                .run_arg("+run")
+                .test_arg("+test")
+                .build_arg("+build"),
+            Builders::Mix => BuilderCmd::builder("mix"),
+            Builders::Cargo => BuilderCmd::builder("cargo"),
+            Builders::Go => BuilderCmd::new("go")
+                .run_arg("run")
+                .run_arg("./...")
+                .test_arg("test")
+                .test_arg("./...")
+                .build_arg("build")
+                .build_arg("./..."),
+            Builders::DockerCompose => BuilderCmd::builder("docker-compose"),
+            Builders::Docker => BuilderCmd::builder("docker"),
+        }
+    }
+}
+
+impl BuilderCmd {
+    fn new(name: &str) -> Self {
+        Self::create(
+            name,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+    }
+
+    fn builder(name: &str) -> Self {
+        Self::new(name)
+            .run_arg("run")
+            .test_arg("test")
+            .build_arg("build")
+    }
+
+    fn create(name: &str, run: Vec<String>, test: Vec<String>, build: Vec<String>) -> Self {
+        BuilderCmd {
+            name: name.to_string(),
+            run,
+            test,
+            build,
+        }
+    }
+
+    fn run_arg(mut self, arg: &str) -> Self {
+        self.run.push(arg.to_string());
+        self
+    }
+
+    fn test_arg(mut self, arg: &str) -> Self {
+        self.test.push(arg.to_string());
+        self
+    }
+
+    fn build_arg(mut self, arg: &str) -> Self {
+        self.build.push(arg.to_string());
+        self
+    }
+
+    fn run(&self) -> Vec<String> {
+        self.run.clone()
+    }
+
+    fn test(&self) -> Vec<String> {
+        self.test.clone()
+    }
+
+    fn build(&self) -> Vec<String> {
+        self.build.clone()
+    }
+
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+}
+
+#[derive(Debug)]
+struct Builder {
+    pwd: PathBuf,
+    cmd: BuilderCmd,
+}
+
+impl Builder {
+    fn new(pwd: PathBuf, cmd: BuilderCmd) -> Self {
+        Builder { pwd, cmd }
+    }
+
+    fn cmd(&self) -> String {
+        self.cmd.name()
+    }
+
+    fn run(&self) -> Vec<String> {
+        self.cmd.run()
+    }
+
+    fn test(&self) -> Vec<String> {
+        self.cmd.test()
+    }
+
+    fn build(&self) -> Vec<String> {
+        self.cmd.build()
+    }
+
+    fn pwd(&self) -> PathBuf {
+        self.pwd.clone()
+    }
+}
+
+fn find(pwd: &Path) -> Option<Builders> {
     if !pwd.is_dir() {
         return None;
     }
 
-    RECIPES
-        .iter()
-        .find_map(|(name, builder)| {
-            let path = pwd.join(name);
-            println!("{:?} ", path);
-            if path.exists() {
-                return Some((pwd.clone(), name, builder));
-            }
-            None
-        })
-        .map(|(pwd, name, builder)| {
-            let (dr, dt, db) = (
-                vec!["run".to_string()],
-                vec!["test".to_string()],
-                vec!["build".to_string()],
-            );
-            let (c, r, t, b) = match builder {
-                Builders::Make => ("make".to_string(), dr, dt, db),
-                Builders::Task => ("task".to_string(), dr, dt, db),
-                Builders::Earth => (
-                    "earth".to_string(),
-                    vec!["+run".to_string()],
-                    vec!["+test".to_string()],
-                    vec!["+build".to_string()],
-                ),
-                Builders::Mix => ("mix".to_string(), dr, dt, db),
-                Builders::Cargo => ("cargo".to_string(), dr, dt, db),
-                Builders::Go => (
-                    "go".to_string(),
-                    vec!["run".to_string(), "./...".to_string()],
-                    vec!["test".to_string(), "./...".to_string()],
-                    vec!["build".to_string(), "./...".to_string()],
-                ),
-                Builders::DockerCompose => ("docker-compose".to_string(), dr, dt, db),
-                Builders::Docker => ("docker".to_string(), dr, dt, db),
-            };
-            Builder {
-                pwd,
-                cmd: c,
-                run: r,
-                test: t,
-                build: b,
-                recipe: name.to_string(),
-                priority: *builder,
-            }
-        })
+    RECIPES.iter().find_map(|(name, builder)| {
+        let path = pwd.join(name);
+        if path.exists() {
+            return Some(builder.to_owned());
+        }
+
+        None
+    })
 }
 
-fn exec(pwd: PathBuf, cmd: &str, args: Vec<String>) -> Result<(), Error> {
-    let mut child = Command::new(cmd)
-        .current_dir(pwd)
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+fn discover(pwd: PathBuf) -> Option<Builder> {
+    find(&pwd).map(|builder| {
+        let cmd = builder.into();
+        Builder::new(pwd, cmd)
+    })
+}
 
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::new(ErrorKind::Other, "Could not capture standard output."))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| Error::new(ErrorKind::Other, "Could not capture standard error."))?;
+fn exec(pwd: PathBuf, cmd: &str, args: Vec<String>) -> Result<(), io::Error> {
+    let ce = duct::cmd(cmd, args).dir(pwd).stderr_to_stdout().reader()?;
 
-    // let mut rout = BufReader::new(stdout);
-    let rerr = BufReader::new(stderr);
+    let t = thread::spawn(move || -> Result<(), io::Error> {
+        let mut reader = BufReader::new(ce);
 
-    let tout = thread::spawn(move || -> Result<(), Error> {
+        let mut o = std::io::stdout();
         let mut buf = [0u8; 1024];
-        loop {
-            let num_read = stdout.read(&mut buf)?;
-            if num_read == 0 {
+
+        while let Ok(s) = reader.read(&mut buf) {
+            if s == 0 {
                 break;
             }
 
-            let buf = &buf[..num_read];
-            std::io::stdout().write_all(buf)?;
+            o.write_all(&buf[0..s])?;
         }
+
         Ok(())
-        // rout.lines()
-        // // .map_while(|line| line.ok())
-        // .filter_map(|line| line.ok())
-        // .for_each(|line| {
-        //     // std::io::stdout().write_all(line.as_bytes()).unwrap();
-        //     println!("{}", line)
-        // });
-        // rout.bytes()
-        //     .map_while(|b| b.ok())
-        //     .map(|b| std::io::stdout().write_all(&[b]))
     });
 
-    let terr = thread::spawn(move || {
-        rerr.bytes()
-            .map_while(|b| b.ok())
-            .map(|b| std::io::stderr().write_all(&[b]))
-    });
-
-    let _ = tout.join();
-    jjterr.join();
-
-    child.wait()?;
-
-    Ok(())
+    t.join().unwrap()
 }
 
 #[derive(Parser)]
 #[command(author, version, about)]
 struct BuildAny {
+    /// Shell completion.
+    #[arg(short, long)]
+    completion: Option<Shell>,
+
+    /// Project build tool.
+    #[arg(short, long, value_enum)]
+    target: Option<Builders>,
+
+    /// Project directory to execute the command.
+    #[arg(short, long, value_hint=ValueHint::DirPath)]
+    dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
-
-    pwd: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Build command.
     Build,
+
+    /// Run command.
     Run,
+
+    /// Test command.
     Test,
+}
+
+fn print_completions<G: Generator>(gen: G, cmd: &mut Command) {
+    clap_complete::generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
 }
 
 fn main() {
     let cli = BuildAny::parse();
+    if let Some(sh) = cli.completion {
+        let mut cmd = BuildAny::command();
+        print_completions::<clap_complete::Shell>(sh, &mut cmd);
+        process::exit(0);
+    }
 
-    let pwd = cli.pwd.or_else(|| env::current_dir().ok());
-    println!("{:?} ", pwd);
-    let br = pwd.and_then(discover);
-    println!("{:?} ", br);
+    let pwd = cli.dir.or_else(|| env::current_dir().ok());
+    let br = pwd.and_then(|p| {
+        if let Some(b) = cli.target {
+            Some(Builder::new(p, b.into()))
+        } else {
+            discover(p)
+        }
+    });
+
     if let Some(b) = br {
+        eprintln!("⌛ Running: {}\n", style(b.cmd()).green());
+
         let res = match cli.command {
-            Commands::Build => exec(b.pwd, &b.cmd, b.build),
-            Commands::Run => exec(b.pwd, &b.cmd, b.run),
-            Commands::Test => exec(b.pwd, &b.cmd, b.test),
+            Commands::Build => exec(b.pwd(), &b.cmd(), b.build()),
+            Commands::Run => exec(b.pwd(), &b.cmd(), b.run()),
+            Commands::Test => exec(b.pwd(), &b.cmd(), b.test()),
         };
+
         if let Err(e) = res {
-            eprintln!("{}", e);
+            eprintln!("💀 Failed: {}", style(e).red());
         }
     };
-    println!("{:?} ", env::var("PWD"));
+}
+
+#[cfg(test)]
+mod test_buildany {
+    use std::fs::File;
+
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_find_pwd_must_dir() -> Result<(), io::Error> {
+        let tmp = tempdir::TempDir::new("buildany_find")?;
+        let fp = tmp.path().join("Cargo.toml");
+        let _f = File::create(&fp)?;
+
+        assert_eq!(find(&fp.clone()), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_pwd_must_exists() -> Result<(), io::Error> {
+        let tmp = tempdir::TempDir::new("buildany_find")?;
+        let fp = tmp.path().join("nonexistent");
+
+        assert_eq!(find(&fp), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_pwd_unsup() -> Result<(), io::Error> {
+        let tmp = tempdir::TempDir::new("buildany_find")?;
+        let fp = tmp.path().join("unsupported.yml");
+        let _ = File::create(fp)?;
+
+        assert_eq!(find(tmp.path()), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_ordered() -> Result<(), io::Error> {
+        let tmp = tempdir::TempDir::new("buildany_find")?;
+
+        let fpc = tmp.path().join("Cargo.toml");
+        let _f = File::create(fpc)?;
+
+        let make = "Makefile";
+        let fp = tmp.path().join(make);
+        let _f = File::create(fp)?;
+
+        assert_eq!(find(tmp.path()), Some(Builders::Make));
+
+        Ok(())
+    }
 }
