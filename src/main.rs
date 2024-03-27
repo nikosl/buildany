@@ -47,7 +47,7 @@ impl From<Builders> for BuilderCmd {
                 .run_arg("+run")
                 .test_arg("+test")
                 .build_arg("+build"),
-            Builders::Mix => BuilderCmd::builder("mix"),
+            Builders::Mix => BuilderCmd::new("mix").build_arg("compile").test_arg("test"),
             Builders::Cargo => BuilderCmd::builder("cargo"),
             Builders::Go => BuilderCmd::new("go")
                 .run_arg("run")
@@ -56,8 +56,25 @@ impl From<Builders> for BuilderCmd {
                 .test_arg("./...")
                 .build_arg("build")
                 .build_arg("./..."),
-            Builders::DockerCompose => BuilderCmd::builder("docker-compose"),
-            Builders::Docker => BuilderCmd::builder("docker"),
+            Builders::DockerCompose => {
+                let b = BuilderCmd::new("docker")
+                    .build_arg("compose")
+                    .build_arg("build");
+
+                if cfg!(debug_assertions) {
+                    b.run_arg("compose").run_arg("up")
+                } else {
+                    b
+                }
+            }
+            Builders::Docker => {
+                let b = BuilderCmd::new("docker").build_arg("build");
+                if cfg!(debug_assertions) {
+                    b.run_arg("run").run_arg("--rm").run_arg("-it")
+                } else {
+                    b
+                }
+            }
         }
     }
 }
@@ -175,6 +192,10 @@ fn discover(pwd: PathBuf) -> Option<Builder> {
 }
 
 fn exec(pwd: PathBuf, cmd: &str, args: Vec<String>) -> Result<(), io::Error> {
+    if args.is_empty() {
+        return Ok(());
+    }
+
     let ce = duct::cmd(cmd, args).dir(pwd).stderr_to_stdout().reader()?;
 
     let t = thread::spawn(move || -> Result<(), io::Error> {
