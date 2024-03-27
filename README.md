@@ -2,6 +2,17 @@
 
 Simple tool that auto detect and executes a build system target.
 
+## Supported
+
+1. [Make](https://www.gnu.org/software/make/manual/make.html)
+2. [Taskfile](https://taskfile.dev/) (**searches for *Taskfile.yml***)
+3. [Earthly](https://earthly.dev/)
+4. [Mix](https://hexdocs.pm/elixir/introduction-to-mix.html) (**only build, test**)
+5. [Cargo](https://doc.rust-lang.org/stable/cargo/)
+6. [go](https://pkg.go.dev/cmd/go)
+7. [Docker compose](https://docs.docker.com/compose/reference/) (**only build**)
+8. [Docker](https://www.docker.com/) (**only build**)
+
 ## Install
 
 Download and extract under a `$PATH` registered directory.
